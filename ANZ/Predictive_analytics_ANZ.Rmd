@@ -1,0 +1,715 @@
+---
+title: "Predicitve Analytics"
+author: "Biljana Simonovikj"
+date: "20/12/2020"
+output:
+  html_document:
+    code_folding: hide
+    fig_caption: yes
+    fig_height: 6
+    fig_width: 8
+    theme: yeti
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#------------------------------------------------------
+# Install and load the liberaries used in this project:
+#------------------------------------------------------
+library(AppliedPredictiveModeling)
+library(ggplot2)
+library(tidyverse)
+library(scales)
+library(dplyr)
+library(funModeling)
+library(ggpubr)
+library(gridExtra)
+library(caret)
+library(corrplot)
+library(lattice)
+library(dplyr)
+library(tidyr)
+library(e1071)
+library(graphics)
+library(hrbrthemes)
+library(glmnet)
+library(kernlab)
+library(gbm)
+library(Cubist)
+devtools::install_github('rstudio/rmarkdown')
+```
+
+```{r, out.width = "90%", fig.align = "center"}
+knitr::include_graphics('/Users/Biljana/R files/PA/anz_image.png')
+```
+
+This task is based on a synthesised transaction dataset containing 3 months’ worth of transactions for 100 hypothetical customers. It contains purchases, recurring transactions, and salary transactions.The dataset is designed to simulate realistic transaction behaviours that are observed in ANZ’s real transaction data.
+
+Our first task is to identify annual salary for each customer and to explore correlations between annual salary and various customer attributes (e.g. age). These attributes could be those that are readily available in the data (e.g. age) or those that we construct or derive ourselves (e.g. those relating to purchasing behaviour). Once we found some correlations, our second task is to predict the annual salary for each customer by using the attributes we identified above. 
+
+In order to achieve this goal, we will try a number of standard linear and non-linear algorithms to spot-check our problem in R. In general, our analysis can be broken down into 5 steps:
+
+*  descriptive statistics and data visualization to better understand the data
+*  data pre-processing in order to better expose the structure of the prediction problem to modeling algorithms
+*  evaluation of algorithms
+*  improving results by algorithm tuning and ensemble methods 
+*  finalizing the model, making predictions and presenting results
+
+<p>&nbsp;</p>
+#### 1. Import the Dataset
+<p>&nbsp;</p>
+```{r}
+knitr::opts_chunk$set(fig.width = 6, fig.height = 7,
+                      warning = FALSE, message = FALSE)
+# Import the dataset
+anz_data <- read.csv("/Users/Biljana/R files/PA/ANZ synthesised transaction dataset.csv",
+                     header = TRUE, na.strings = c("","NA"))
+
+# Change the format of date column
+anz_data$date <- as.Date(anz_data$date, format = "%d/%m/%Y")
+knitr::kable(head(anz_data[1:6, 1:7]),
+             caption = "Table 1: Glimse at the first seven columns of the 
+             ANZ synthesised transaction dataset",
+             align = 'c', format = "markdown")
+```
+
+<p>&nbsp;</p>
+#### 1.1. Correlations between annual salary and various customer attributes {.tabset .tabset-fade .tabset-pills}   
+<p>&nbsp;</p>
+##### Annual salary by customer
+```{r}
+# Create the initial dataframe to store the results
+df_customer = data.frame(customer_id = unique(anz_data$customer_id))
+
+# Create a mode function to find out what is the salary payment frequency
+mode <- function(x) {   
+  ux <- unique(x)   
+  ux[which.max(tabulate(match(x, ux)))] 
+  }
+
+# Create a loop to process through all salary payments for each customer
+for (i in seq(nrow(df_customer))) {
+  transaction_data <- anz_data[anz_data$customer_id == df_customer$customer_id[i]
+                               & anz_data$txn_description ==    
+                               "PAY/SALARY",c("amount","date")] %>%
+    dplyr::group_by(date) %>%
+    dplyr::summarise(amount = sum(amount))
+    total_sum <- sum(transaction_data$amount)
+    count = dim(transaction_data)[1]
+    if (count == 0) {
+    df_customer$frequency[i] = NA
+    df_customer$level[i] = NA
+  } else {
+    s = c()
+    lvl = c()
+    for (j in seq(count - 1)) {
+      s = c(s,(transaction_data$date[j + 1] - transaction_data$date[j]))
+      lvl = c(lvl,transaction_data$amount[j])}
+    lvl = c(lvl,tail(transaction_data$amount,n = 1))
+    df_customer$frequency[i] = mode(s)
+    df_customer$level[i] = mode(lvl)
+  }
+}
+
+df_customer$annual_salary = df_customer$level / df_customer$frequency * 365.25
+df_customer_table <- as.data.frame(df_customer)
+knitr::kable(head(df_customer_table, n = 10),
+             caption = "Table 2: Calculated annual salary by customer",
+             align = 'c', format = "markdown")
+
+# Distribution of customers' annual salary
+hist(df_customer$annual_salary[!is.na(df_customer$annual_salary)],breaks = c(seq(28000,140000,by = 10000)),
+     col = rgb(0,0,0,0.5), main = "Histogram of Annual Salary", xlab = 'Income, ($)')
+```
+
+##### Annual salary by various customer attributes 
+```{r}
+# Create a dataframe to summarize customers' consumption behavior
+df_attributes <- anz_data %>%
+  # use anz_data to summarize customers' consumption behavior
+  dplyr::select(customer_id, gender, age, amount, date, balance) %>%
+  group_by(customer_id) %>%
+  dplyr::mutate(num_trans = n(),
+             avg_weekly_trans = round(7*n()/length(unique(date)),0),
+             max_amount = max(amount),
+             num_large_trans = sum(amount > 100),
+             # an arbitrary $100 benchmark is selected
+             use_num_day = length(unique(date)),
+             avg_trans_amount = mean(amount, na.rm = TRUE),
+             med_balance = median(balance,na.rm = TRUE)) %>%
+  dplyr::select(-c("amount","date","balance")) %>%
+  unique()
+
+# Assign gender as binary numeric variable
+df_attributes$gender_num <- ifelse(df_attributes$gender == "M",1,0)
+
+# Assign age by groups as binary numeric variables
+df_attributes$age_below20 <- ifelse(df_attributes$age < 20,1,0)
+df_attributes$age_btw20n40 <- ifelse(df_attributes$age >= 20 & df_attributes$age < 40,1,0)
+df_attributes$age_btw40n60 <- ifelse(df_attributes$age >= 40 & df_attributes$age < 60,1,0)
+
+# Merge all the attributes into single dataframe and select relevant attributes
+customer_data <- merge(df_customer, df_attributes)
+# Remove columns: customer_id, frequency and level
+customer_data <- customer_data[ ,c(4:17)] # 14 columns left
+```
+
+```{r, message = FALSE, figures-side, fig.show="hold", out.width="50%"}
+# 1. Scatter plot of annual salary versus age
+ggplot(customer_data, aes(x = age, y = annual_salary, 
+                                    color = gender)) +  geom_point(size = 2) +
+  stat_smooth(aes(group = 1), method = "lm", se = TRUE, position = "identity", col = "grey56") +
+  theme_ipsum() +
+  labs(title = "Annual Salary vs Age",
+       subtitle = "ANZ Customer Database", y = "Annual salary, ($)", x = "Age") +
+   scale_y_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),
+                 labels = scales::trans_format("log10", scales::math_format(10^.x))) + 
+  scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),
+                labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.title = element_blank(),
+    plot.title = element_text(vjust = 2, face = 'bold'),
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(),
+    axis.title.x = element_text(size = 12, margin = margin(10,0,0,0)),
+    axis.title.y = element_text(size = 14, margin = margin(0,10,0,0)))
+
+# 2. Scatter plot of annual salary versus avg_trans_amount
+ggplot(customer_data, aes(x = avg_trans_amount, y = annual_salary,
+                          color = gender)) +  geom_point(size = 2) +
+  stat_smooth(aes(group = 1), method = "lm", se = TRUE, position = "identity", col = "grey56") +
+  theme_ipsum() +
+  labs(title = "Annual Salary vs Average Transactions Amount",
+       subtitle = "ANZ Customer Database", y = "Annual salary, ($)", x = "Avgerage transactions amount, ($)") +
+  scale_y_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),
+                labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),
+                labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.title = element_blank(),
+    plot.title = element_text(vjust = 2, face = 'bold'),
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(),
+    axis.title.x = element_text(size = 12, margin = margin(10,0,0,0)),
+    axis.title.y = element_text(size = 14, margin = margin(0,10,0,0)))
+
+# 3. Scatter plot of annual salary versus maximum transactions amount
+ggplot(customer_data, aes(x = max_amount, y = annual_salary,
+                          color = gender)) +  geom_point(size = 2) +
+  stat_smooth(aes(group = 1), method = "lm", se = TRUE, position = "identity", col = "grey56") +
+  theme_ipsum() +
+  labs(title = "Annual Salary vs Maximum Transactions Amount",
+       subtitle = "ANZ Customer Database", y = "Annual salary, ($)", x = "Maximum transactions amount, ($)") +
+  scale_y_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),
+                labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),
+                labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.title = element_blank(),
+    plot.title = element_text(vjust = 2, face = 'bold'),
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(),
+    axis.title.x = element_text(size = 12, margin = margin(10,0,0,0)),
+    axis.title.y = element_text(size = 14, margin = margin(0,10,0,0)))
+
+# 4. Scatter plot of annual salary versus number of transactions by customer
+ggplot(customer_data, aes(x = num_trans, y = annual_salary,
+                          color = gender)) +  geom_point(size = 2) +
+  stat_smooth(aes(group = 1), method = "lm", se = TRUE, position = "identity", col = "grey56") +
+  theme_ipsum() +
+  labs(title = "Annual Salary vs Transactions Count",
+       subtitle = "ANZ Customer Database", y = "Annual salary, ($)", x = "Number of transactions by customer") +
+  scale_y_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),
+                labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),
+                labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.title = element_blank(),
+    plot.title = element_text(vjust = 2, face = 'bold'),
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(),
+    axis.title.x = element_text(size = 12, margin = margin(10,0,0,0)),
+    axis.title.y = element_text(size = 14, margin = margin(0,10,0,0)))
+```
+
+<p>&nbsp;</p>
+#### 1.2 Validation Dataset
+<p>&nbsp;</p>
+We will split the loaded dataset into two, 80% of which we will use to train our models and 20% that we will hold back as a validation dataset. Later, we will estimate the accuracy of the models we create on validation dataset.
+```{r}
+# First to eliminate categorical gender variable that was kept for plotting scatter plots above
+customer_data <- customer_data[ ,-2] # 13 columns left 
+# Create train and test datasets
+set.seed(7)
+validationIndex <- createDataPartition(customer_data$annual_salary, p = 0.80, list = FALSE)
+# select 20% of the data for validation
+validation <- customer_data[-validationIndex,]
+# use the remaining 80% of data to training and testing the models
+dataset <- customer_data[validationIndex,]
+```
+
+<p>&nbsp;</p>
+#### 2. Analyze Data - Descriptive Statistics
+<p>&nbsp;</p>
+##### 2.1 Dimensions of the dataset
+<p>&nbsp;</p>
+```{r}
+dim(dataset)
+```
+We have 80 instances to work with and can confrm the data has 13 attributes including the response variable annual_salary.
+<p>&nbsp;</p>
+##### 2.2 List types of each attribute
+<p>&nbsp;</p>
+```{r}
+options(width = 100)
+sapply(dataset, class)
+```
+We can see that nine of the attributes are numeric while four are integers.
+ 
+<p>&nbsp;</p>
+##### 2.3 Summarize attribute distributions
+<p>&nbsp;</p>
+```{r}
+options(width = 100)
+sum_m <- sapply(dataset, summary)
+df_sum <- as.data.frame(sum_m)
+t(df_sum)
+```
+<p>&nbsp;</p>
+##### 2.4 Calculate skewness for each attribute
+<p>&nbsp;</p>
+```{r}
+skew <- apply(dataset, 2, skewness)
+print(skew)
+```
+The further the distribution of the skew value from zero, the larger the skew to the left
+(negative skew value) or right (positive skew value)
+<p>&nbsp;</p>
+#### 2.5 Unimodal and Multimodal Data Visualisations{.tabset .tabset-fade .tabset-pills}
+<p>&nbsp;</p>
+##### Histograms
+Let's look at visualizations of individual attributes and start with histograms to get a sense of the data distributions. Some of the attributes have skewed Gaussian distribution to the right like annual_salary, use_num_day, avg_trans_amount and med_balance. We are going to keep the data intact for now. 
+```{r, fig.height=9, fig.width=8}
+# Plot histograms for each input (explanatory) variable
+par(mfrow = c(4,3), oma = c(4,3,4,3), mar = c(1,4,3,2))
+for (i in 2:13) {
+  graphics::hist(dataset[,i], main = names(dataset[i]), xlab = "", col = "grey50")
+}
+```
+
+##### Density Plots
+```{r, fig.height=9, fig.width = 8}
+# Density plots for each variable
+mycolors = c('red','darkturquoise','blue',"orange", "magenta1","green", "red",    
+             "darkturquoise", "blue", "orange", "magenta1", "green", "red")
+par(mfrow = c(4,3), oma = c(0,1,0,1), mar = c(1,6,3,2))
+for (i in 2:13) {
+  graphics::plot(density(dataset[,i]), main = names(dataset)[i], col = mycolors[i])
+}
+```
+
+##### Box Plots
+We can see that the data has a different range and some variables have extreme outliers. 
+```{r, fig.height=9, fig.width = 8}
+# Box plots for each variable
+par(mfrow = c(4,3), oma = c(0,1,0,1), mar = c(1,6,2,2))
+for (i in 2:13) {
+  graphics::boxplot(dataset[,i], main = names(dataset)[i], col = mycolors[i])
+}
+```
+
+##### Scatter Plots
+Let's look at some visualizations of the interactions between variables and start with scatterplot matrix. We can see that some of the higher correlated attributes do show good structure in their relationship. There is a linear (diagonal) relationship between annual salary and max_amount and num_trans and avg_weekly_trans.
+```{r, fig.width = 9}
+# Scactterplot matrices for all attributes 
+dataset_scatter <- sapply(dataset[ , 1:9], jitter)
+pairs(dataset_scatter[ , 1:9], col = mycolors)
+```
+
+<p>&nbsp;</p>
+##### Correlation Plot
+<p>&nbsp;</p>
+Lets take a look at the correlation between each pair of numeric attributes except the response variable. This is interesting. We can see that some of the attributes have a strong correlation (e.g. > 0:70 or < 0:70). For example:
+
+*  num_trans and use_num_day with 0.83
+*  num_trans and avg_weekly_trans with 0.90
+*  age_btw20n40 and age_btw40n60 with strong negative correlation of -0.70
+
+These attributes are candidates for removal because correlated attributes are reducing the accuracy of the linear algorithms. This is collinearity and we may see better results with regression algorithms if the correlated attributes are removed. Later, we will perform data transformation with powerful data transforms provided by [caret](https://cran.r-project.org/web/packages/caret/caret.pdf) package.
+```{r, fig.align='center',fig.width=8}
+# Correlation between all of the numeric attributes except annual_salary
+annual_salary <- dataset$annual_salary # assign annual_salary variable as vector
+
+# Create a dataframe for correlation plot
+dataset_cor <- dataset[ ,-1]
+# Plot the correlation matrix
+correlation_matrix <- cor(dataset_cor)
+corrplot.mixed(correlation_matrix, order = "hclust", tl.pos = "lt",
+               upper = "ellipse")
+```
+
+
+
+
+
+
+<p>&nbsp;</p>
+#### 3. Summary of Ideas
+<p>&nbsp;</p>
+There is a lot of structure in this dataset. We need to think about transformations that we could apply such as:
+
+*  Feature selection and removing the most correlated attributes
+*  Normalization of the dataset to reduce the efect of differing scales
+*  Standardization of the dataset to reduce the efect of differing distributions
+*  Box-Cox transform to see if modifying distributions towards normality will improve accuracy
+
+
+<p>&nbsp;</p>
+#### 4. Evaluate Algorithms{.tabset .tabset-fade .tabset-pills}
+<p>&nbsp;</p>
+
+We will select a number of different algorithms capable of working on this regression
+problem. We will use 10-fold cross validation with 3 repeats. We will evaluate algorithms using the RMSE and R2 metrics. RMSE or Root Mean Squared Error is the average deviation of the predictions from the observations. It is useful to get a gross idea of how well (or not) an algorithm is performing in the units of the response variable. Values closest to zero are the best. R2 (R Squared) or also called the coefficient of determination provides a goodness-of-fit measure for the predictions to the observations. This is a value between 0 and 1 for no-fit and perfect fit respectively. 
+
+The 6 algorithms selected are:
+
+*  Linear Algorithms: Linear Regression (LR), Generalized Linear Regression (GLM) and
+Penalized Linear Regression (GLMNET)
+*  Non-Linear Algorithms: Classifcation and Regression Trees (CART), Support Vector
+Machines (SVM) with a radial basis function and k-Nearest Neighbors (KNN)
+
+<p>&nbsp;</p>
+##### Baseline
+<p>&nbsp;</p>
+Summary of the estimated model accuracy shows that GLMNET has the lowest RMSE value followed closely by SVM and the other linear algorithms GLM and LM. We can also see that GLMNET has the best fit for the data in its R2 measures.
+```{r}
+# Run algorithms using 10-fold cross validation
+trainControl <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+metric <- "RMSE"
+
+# LM
+set.seed(7)
+fit.lm <- train(annual_salary~., data = dataset, method = "lm",
+                metric = metric, preProc = c("center","scale"), trControl = trainControl)
+# GLM
+set.seed(7)
+fit.glm <- train(annual_salary~., data = dataset, method = "glm",
+                 metric = metric, preProc = c("center","scale"), trControl = trainControl)
+# GLMNET
+set.seed(7)
+fit.glmnet <- train(annual_salary~., data = dataset, method = "glmnet", metric = metric,
+                    preProc = c("center", "scale"), trControl = trainControl)
+# SVM
+set.seed(7)
+fit.svm <- train(annual_salary~., data = dataset, method = "svmRadial", metric = metric,
+                 preProc = c("center", "scale"), trControl = trainControl)
+# CART
+set.seed(7)
+grid <- expand.grid(.cp = c(0, 0.05, 0.1))
+fit.cart <- train(annual_salary~., data = dataset, method = "rpart", metric = metric, tuneGrid = grid,
+                  preProc = c("center", "scale"), trControl = trainControl)
+
+# KNN
+set.seed(7)
+fit.knn <- train(annual_salary~., data = dataset, method = "knn", metric = metric, preProc = c("center","scale"), trControl = trainControl)
+
+
+# Compare algorithms
+results <- resamples(list(LM = fit.lm, GLM = fit.glm, GLMNET = fit.glmnet, SVM = fit.svm,
+                          CART = fit.cart, KNN = fit.knn))
+summary(results)
+dotplot(results)
+```
+<p>&nbsp;</p>
+##### Feature Selection
+<p>&nbsp;</p>
+In this step we will remove the highly correlated attributes and see what efect that has on the evaluation metrics. The findCorrelation() function from the [caret](https://cran.r-project.org/web/packages/caret/caret.pdf) package identified num_trans attribute as a highly correlated attribute. Now let's try the same 6 algorithms from our base line experiment. Comparing the results, we can see that this has made the RMSE worse or without any effect for the linear and the non-linear algorithms. The correlated attribute we removed is contributing to the accuracy of the models.
+
+<p>&nbsp;</p>
+ *Highly correlated atributes*
+ <p>&nbsp;</p>
+```{r}
+# Remove correlated attributes
+set.seed(7)
+cutoff <- 0.70
+highly_correlated <- findCorrelation(correlation_matrix, cutoff = cutoff)
+for (value in highly_correlated) {
+  print(names(dataset_cor)[value])
+}
+# Create a new dataset without highly corrected features
+dataset_features <- dataset_cor[,-highly_correlated]
+# Attach annual_salary to the df
+dataset_features <- cbind(dataset_features, annual_salary)
+```
+<p>&nbsp;</p>
+ *Summary of estimated model accuracy*
+ <p>&nbsp;</p>
+```{r}
+# Run algorithms using 10-fold cross validation
+trainControl <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+metric <- "RMSE"
+# lm
+set.seed(7)
+fit.lm <- train(annual_salary~., data = dataset_features, method = "lm", metric = metric,
+                preProc = c("center", "scale"), trControl = trainControl)
+# GLM
+set.seed(7)
+fit.glm <- train(annual_salary~., data = dataset_features, method = "glm", metric = metric,
+                 preProc = c("center", "scale"), trControl = trainControl)
+# GLMNET
+set.seed(7)
+fit.glmnet <- train(annual_salary~., data = dataset_features, method = "glmnet", metric = metric,
+                    preProc = c("center", "scale"), trControl = trainControl)
+# SVM
+set.seed(7)
+fit.svm <- train(annual_salary~., data = dataset_features, method = "svmRadial", metric = metric,
+                 preProc = c("center", "scale"), trControl = trainControl)
+# CART
+set.seed(7)
+grid <- expand.grid(.cp = c(0, 0.05, 0.1))
+fit.cart <- train(annual_salary~., data = dataset_features, method = "rpart", metric = metric,
+                  tuneGrid = grid, preProc = c("center", "scale"), trControl = trainControl)
+# KNN
+set.seed(7)
+fit.knn <- train(annual_salary~., data = dataset_features, method = "knn", metric = metric,
+                 preProc = c("center", "scale"), trControl = trainControl)
+
+# Compare algorithms
+feature_results <- resamples(list(LM = fit.lm, GLM = fit.glm, GLMNET = fit.glmnet, SVM = fit.svm,
+                                  CART = fit.cart, KNN = fit.knn))
+
+summary(feature_results)
+dotplot(feature_results)
+```
+<p>&nbsp;</p>
+##### Box Cox
+<p>&nbsp;</p>
+We can see that this transformation indeed decreased the RMSE and increased the R2 on all except the CART algorithm. The RMSE of GLMNET dropped to an average of 9499.142 and it is the lowest RMSE value.
+```{r}
+# Run algorithms using 10-fold cross validation
+trainControl <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+metric <- "RMSE"
+# lm
+set.seed(7)
+fit.lm <- train(annual_salary~., data = dataset, method = "lm", metric = metric, 
+                preProc = c("center", "scale", "BoxCox"), trControl = trainControl)
+# GLM
+set.seed(7)
+fit.glm <- train(annual_salary~., data = dataset, method = "glm", metric = metric, 
+                 preProc = c("center", "scale", "BoxCox"), trControl = trainControl)
+# GLMNET
+set.seed(7)
+fit.glmnet <- train(annual_salary~., data = dataset, method = "glmnet", metric = metric,
+                    preProc = c("center", "scale", "BoxCox"), trControl = trainControl)
+# SVM
+set.seed(7)
+fit.svm <- train(annual_salary~., data = dataset, method = "svmRadial", metric = metric,
+                 preProc = c("center", "scale", "BoxCox"), trControl = trainControl)
+# CART
+set.seed(7)
+grid <- expand.grid(.cp = c(0, 0.05, 0.1))
+fit.cart <- train(annual_salary~., data = dataset, method = "rpart", 
+                  metric = metric, tuneGrid = grid, preProc = c("center", "scale", "BoxCox"),                         trControl = trainControl)
+
+# KNN
+set.seed(7)
+fit.knn <- train(annual_salary~., data = dataset, method = "knn", metric = metric, 
+                 preProc = c("center", "scale", "BoxCox"), trControl = trainControl)
+
+# Compare algorithms
+transformResults <- resamples(list(LM = fit.lm, GLM = fit.glm, GLMNET = fit.glmnet, SVM = fit.svm,
+                                   CART = fit.cart, KNN = fit.knn))
+summary(transformResults)
+dotplot(transformResults)
+```
+
+<p>&nbsp;</p>
+##### Improve Results with Tuning
+<p>&nbsp;</p>
+The accuracy of the well performing algorithms can be improved by tuning their parameters. We will consider tuning the parameters of GLMNET (Penalized Linear Regression) model. The GLMNET model actually fits many models at once. We can exploit this by passing a large number of lambda values, which control the amount of penalization in the model. train() is smart enough to only fit one model per alpha value and pass all of the lambda values at once for simultaneous fitting.
+
+Often it is more useful to simply think of alpha as controlling the mixing between the two penalties and lambda controlling the amount of penalization. Alpha takes values between 0 and 1. Using alpha = 1 is pure lasso regression and alpha = 0 is pure ridge regression. Now we would try to fit a mixture of the two models (i.e. an elastic net) using an alpha between 0 and 1. For example, alpha = 0.05 would be 95% ridge regression and 5% lasso regression. The final values used for our model are alpha = 0.55 and lambda = 286.5643.
+
+In the obtained results, we can notice that we have tried three alpha values: 0.10, 0.55, and 1.
+The best result uses alpha = 0.55 which is somewhere between ridge and lasso.
+
+Now we try a much larger model search with expanded grid. By setting tuneLength = 10, we will search 10 alpha values and 10 lambda values for each. We do not need to worry about overfitting because this is penalized regression. This gives us a decent RMSE = 9379.896.	
+
+<p>&nbsp;</p>
+*Estimated accuracy of GLMNET*
+<p>&nbsp;</p>
+```{r}
+print(fit.glmnet)
+```
+
+<p>&nbsp;</p>
+```{r, results='hide'}
+# We first setup our cross-validation strategy
+trainControl <- trainControl(method = "repeatedcv", number = 10, repeats = 5)
+metric <- "RMSE"
+set.seed(7)
+tuneGridb <- expand.grid(.alpha = seq(0, 1, 0.05),
+                         .lambda = c(1:10/10, length = 250))
+anz_elnet_int = train(annual_salary ~., data = dataset, method = "glmnet", metric = metric,
+                      preProc = c("BoxCox"), trControl = trainControl, tuneLength = 10,
+                      tuneGrid = tuneGridb)
+
+```
+
+
+```{r}
+plot(anz_elnet_int, main = "Algorithm Tuning Results for GLMNET on the ANZ Dataset")
+```
+
+<p>&nbsp;</p>
+#### 4.1 Estimated accuracy after tuning the parameters
+<p>&nbsp;</p>
+```{r}
+get_best_result = function(caret_fit) {
+  best = which(rownames(caret_fit$results) == rownames(caret_fit$bestTune))
+  best_result = caret_fit$results[best, ]
+  rownames(best_result) = NULL
+  best_result
+}
+
+get_best_result(anz_elnet_int)
+```
+#
+
+
+
+
+
+
+
+
+
+
+
+
+<p>&nbsp;</p>
+#### 5. Ensemble Methods
+<p>&nbsp;</p>
+We can try some ensemble methods based on boosting and bagging techniques for decision trees. Our goal is to see if we can further decrease our RMSE value. Lets take a closer look at the following ensemble methods:
+
+* (RF) - Random Forest, bagging 
+* (GBM) - Gradient Boosting Machines, boosting 
+* (CUBIST) - Cubist, boosting 
+
+Our results clearly demonstrate that Cubist is the most accurate with average RMSE = 9221.86 that is lower than that
+achieved by tuning GLMNET. Let's dive deeper into Cubist and see if we can tune it further and get more skill out of it. Cubist has two parameters that are tunable with caret: committees which is the number of boosting operations and neighbors which is used during prediction and is the number of instances used to correct the rule based prediction. Let's first look at the default tuning parameter used by caret that resulted in our accurate model.
+```{r}
+# Try ensembles
+trainControl <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+metric <- "RMSE"
+# Random Forest
+set.seed(7)
+fit.rf <- train(annual_salary~., data = dataset, method = "rf", metric = metric, 
+                preProc = c("BoxCox"), trControl = trainControl)
+# Stochastic Gradient Boosting
+set.seed(7)
+fit.gbm <- train(annual_salary~., data = dataset, method = "gbm", metric = metric, 
+                 preProc = c("BoxCox"), trControl = trainControl, verbose = FALSE)
+# Cubist
+set.seed(7)
+fit.cubist <- train(annual_salary~., data = dataset, method = "cubist", metric = metric,
+                    preProc = c("BoxCox"), trControl = trainControl)
+# Compare algorithms
+ensemble_results <- resamples(list(RF = fit.rf, GBM = fit.gbm, CUBIST = fit.cubist))
+summary(ensemble_results)
+dotplot(ensemble_results)
+```
+
+
+<p>&nbsp;</p>
+##### 5.1 Look for parameters used by Cubist
+<p>&nbsp;</p>
+```{r}
+# Cubist's parameters
+print(fit.cubist)
+```
+<p>&nbsp;</p>
+We can see that the best RMSE was achieved with committees = 20 and neighbors = 5. Let's use a grid search to tune around those values. We'll try all committees between 5 and 25 and spot-check a neighbors above and below 5. We can see that we have achieved a more accurate model again with RMSE of 9136.876 using committees = 24 and neighbors = 7.
+<p>&nbsp;</p>
+```{r}
+# Tune the Cubist algorithm
+trainControl <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+metric <- "RMSE"
+set.seed(7)
+grid <- expand.grid(.committees = seq(5, 25, by = 1), .neighbors = c(3, 5, 7))
+tune.cubist <- train(annual_salary~., data = dataset, method = "cubist", metric = metric,
+preProc = c("BoxCox"), tuneGrid = grid, trControl = trainControl)
+print(tune.cubist)
+```
+It looks like that cubist result is our most accurate model.
+
+
+```{r}
+plot(tune.cubist, main = "Tuning Paremeters of Cubist on the ANZ Dataset")
+```
+
+
+<p>&nbsp;</p>
+##### 5.2 Finalise Model
+<p>&nbsp;</p>
+In the last step we will finalize this process by creating a new standalone Cubist model with the parameters above trained using the whole dataset and then, we are ready to evaluate the model on validation dataset.
+```{r, results ="hide"}
+# Prepare the data transform using training data
+set.seed(7)
+x <- dataset[,2:13]
+y <- dataset[,1]
+preprocessParams <- preProcess(x, method = c("BoxCox"))
+transX <- predict(preprocessParams, x)
+# Train the final model
+final_model <- cubist(x = transX, y = y, committees = 24)
+
+```
+
+```{r}
+# Transform the validation dataset
+set.seed(7)
+valX <- validation[,2:13]
+trans_valX <- predict(preprocessParams, valX)
+valY <- validation[,1]
+# Use final model to make predictions on the validation dataset
+predictions <- predict(final_model, newdata = trans_valX, neighbors = 7)
+```
+<p>&nbsp;</p>
+##### 5.3 Estimated accuracy on validation dataset
+<p>&nbsp;</p>
+
+```{r}
+# Calculate RMSE
+rmse <- RMSE(predictions, valY)
+r2 <- R2(predictions, valY)
+# Estimated accuracy on validation dataset
+rmse <- round(rmse, 2)
+r2 <- round(r2, 4)
+values <- c(rmse, r2)
+names <- c("RMSE", "Rsquared")
+setNames(values, names)
+
+```
+<p>&nbsp;</p>
+As we can see a cubist model does deliver balance between data and its predictive powers. Cubist models are realtively easy to follow which can be beneficial when convincing business leaders and users of the value the model can bring to the business.
+<p>&nbsp;</p>
+<p>&nbsp;</p>
+<p>&nbsp;</p>
+<p>&nbsp;</p>
