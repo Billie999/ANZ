@@ -5,8 +5,8 @@ Our first task is to identify annual salary for each customer and to explore cor
 
 In order to achieve this goal, we will try a number of standard linear and non-linear algorithms to spot-check our problem in R. In general, our analysis can be broken down into 5 steps:
 
-descriptive statistics and data visualization to better understand the data
-data pre-processing in order to better expose the structure of the prediction problem to modeling algorithms
-evaluation of algorithms
-improving results by algorithm tuning and ensemble methods
-finalizing the model, making predictions and presenting results
+a) descriptive statistics and data visualization to better understand the data
+b) data pre-processing in order to better expose the structure of the prediction problem to modeling algorithms
+c) evaluation of algorithms
+d) improving results by algorithm tuning and ensemble methods
+e) finalizing the model, making predictions and presenting results
